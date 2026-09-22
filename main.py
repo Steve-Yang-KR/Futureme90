@@ -69,8 +69,20 @@ class Checkin(Base):
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
+class WorkoutSession(Base):
+    __tablename__ = "workout_sessions"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    session_date = Column(Date, nullable=False, index=True)
+    exercise = Column(String(40), nullable=False)
+    minutes = Column(Integer, nullable=False, default=0)
+    reps = Column(Integer, nullable=True)
+    hold_seconds = Column(Integer, nullable=True)
+    form_score = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
 Base.metadata.create_all(bind=engine)
-app = FastAPI(title="FutureMe 90 API", version="0.3")
+app = FastAPI(title="FutureMe 90 API", version="0.4")
 
 class AuthInput(BaseModel):
     email: str = Field(min_length=5, max_length=320)
@@ -92,6 +104,14 @@ class CheckinInput(BaseModel):
 class CoachInput(BaseModel):
     question: Optional[str] = Field(default=None, max_length=1500)
     profile: Optional[dict] = None
+
+class WorkoutSessionInput(BaseModel):
+    date: Optional[str] = None
+    exercise: str = Field(min_length=2, max_length=40)
+    minutes: int = Field(ge=1, le=600)
+    reps: Optional[int] = Field(default=None, ge=0, le=10000)
+    hold_seconds: Optional[int] = Field(default=None, ge=0, le=86400)
+    form_score: int = Field(ge=0, le=100)
 
 def db_session():
     db = SessionLocal()
@@ -172,13 +192,20 @@ def serialize_checkin(c: Checkin) -> dict:
         "mobility": c.mobility, "nutrition": c.nutrition, "score": c.score,
     }
 
+def serialize_workout(w: WorkoutSession) -> dict:
+    return {
+        "id": w.id, "date": w.session_date.isoformat(), "exercise": w.exercise,
+        "minutes": w.minutes, "reps": w.reps, "hold_seconds": w.hold_seconds,
+        "form_score": w.form_score,
+    }
+
 @app.get("/")
 def home():
     return FileResponse(INDEX_FILE)
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "version": "0.3", "database": "postgres" if "postgres" in raw_db_url else "sqlite"}
+    return {"ok": True, "version": "0.4", "database": "postgres" if "postgres" in raw_db_url else "sqlite"}
 
 @app.post("/api/auth/register")
 def register(payload: AuthInput, response: Response, db: Session = Depends(db_session)):
@@ -254,10 +281,12 @@ def ai_coach(payload: CoachInput, user: User = Depends(current_user), db: Sessio
         raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured on the server.")
     model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
     recent = db.query(Checkin).filter(Checkin.user_id == user.id).order_by(desc(Checkin.checkin_date)).limit(7).all()
+    recent_workouts = db.query(WorkoutSession).filter(WorkoutSession.user_id == user.id).order_by(desc(WorkoutSession.created_at)).limit(5).all()
     context = {
         "member": {"name": user.name},
         "profile": payload.profile or {},
         "last_7_checkins": [serialize_checkin(c) for c in reversed(recent)],
+        "recent_live_form_sessions": [serialize_workout(w) for w in recent_workouts],
         "question": payload.question or "What should I focus on today?",
     }
     instructions = (
@@ -275,6 +304,32 @@ def ai_coach(payload: CoachInput, user: User = Depends(current_user), db: Sessio
     except Exception as exc:
         raise HTTPException(status_code=502, detail="AI coach request failed: " + str(exc)[:180])
     return {"message": message, "model": model}
+
+
+@app.get("/api/workouts")
+def list_workouts(user: User = Depends(current_user), db: Session = Depends(db_session)):
+    rows = db.query(WorkoutSession).filter(WorkoutSession.user_id == user.id).order_by(desc(WorkoutSession.created_at)).limit(50).all()
+    return {"workouts": [serialize_workout(w) for w in rows]}
+
+@app.post("/api/workouts")
+def save_workout(payload: WorkoutSessionInput, user: User = Depends(current_user), db: Session = Depends(db_session)):
+    try:
+        session_date = date.fromisoformat(payload.date) if payload.date else date.today()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date.")
+    exercise = payload.exercise.strip().lower()
+    allowed = {"squat", "pushup", "lunge", "plank"}
+    if exercise not in allowed:
+        raise HTTPException(status_code=400, detail="Unsupported exercise.")
+    row = WorkoutSession(
+        user_id=user.id, session_date=session_date, exercise=exercise,
+        minutes=payload.minutes, reps=payload.reps, hold_seconds=payload.hold_seconds,
+        form_score=payload.form_score,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"workout": serialize_workout(row)}
 
 @app.get("/api/trainer/alerts")
 def trainer_alerts(_: User = Depends(trainer_user), db: Session = Depends(db_session)):
