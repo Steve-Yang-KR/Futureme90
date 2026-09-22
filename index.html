@@ -331,6 +331,13 @@ async function askRealCoach(){
     out.textContent=d.message||"No response returned.";
   }catch(e){out.textContent="AI Coach error: "+e.message}
 }
+async function saveWorkoutMetrics(summary){
+  if(!FM_USER)return false;
+  await fmApi("/api/workouts",{method:"POST",body:JSON.stringify(summary)});
+  return true;
+}
+window.saveWorkoutMetrics=saveWorkoutMetrics;
+
 async function loadTrainerAlerts(){
   const status=document.getElementById("trainerAlertStatus"),body=document.getElementById("trainerAlerts");
   if(!FM_USER){status.textContent="Sign in with a trainer account first.";return}
@@ -505,6 +512,7 @@ async function saveSession(){
   if(workout)workout.value=Math.max(+workout.value||0,mins);
   const st=state();st.lastLiveSession={date:new Date().toISOString().slice(0,10),exercise:exercise.value,minutes:mins,reps:exercise.value==="plank"?null:reps,hold_seconds:exercise.value==="plank"?Math.floor(goodHoldMs/1000):null,form_score:Math.round(currentScore||0)};saveState(st);
   try{await window.saveCheckin()}catch(e){}
+  try{if(window.saveWorkoutMetrics)await window.saveWorkoutMetrics(st.lastLiveSession)}catch(e){}
   if(running)stop();
   go("today");
   if(document.getElementById("saveNote"))saveNote.textContent="Live Form AI session saved to Today • "+mins+" min";
